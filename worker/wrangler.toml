@@ -1,0 +1,10 @@
+name = "stockwatch"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+[[kv_namespaces]]
+binding = "STOCKWATCH_KV"
+id = "74d0c343a9fd42c8b4f6c1239a118684"
+
+[triggers]
+crons = ["0 * * * *", "0 */2 * * *"]

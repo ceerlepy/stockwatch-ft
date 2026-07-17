@@ -1,0 +1,40 @@
+# Codemagic CI/CD — GitHub Actions'a ALTERNATİF / YEDEK
+# -----------------------------------------------------------
+# Kullanım: codemagic.io'ya GitHub ile giriş yap, bu repoyu bağla,
+# "codemagic.yaml" otomatik algılanır. Görsel UI'dan da tetiklenebilir.
+# Ücretsiz katman: 500 dk/ay (Android build ~3-5 dk).
+#
+# NEDEN YEDEK: GitHub Actions bir gün kırılır/limit dolarsa buradan derlersin.
+# Telefonda Codemagic'in görsel arayüzü YAML'dan biraz daha kolaydır.
+
+workflows:
+  android-debug:
+    name: StockWatch Android Debug
+    instance_type: linux_x2          # Android için Linux yeterli (ucuz/hızlı)
+    max_build_duration: 30
+    environment:
+      java: 17
+    scripts:
+      - name: Gradle wrapper izni (varsa)
+        script: |
+          cd android
+          chmod +x gradlew 2>/dev/null || true
+      - name: Debug APK derle
+        script: |
+          cd android
+          # Wrapper yoksa sistemdeki gradle ile derle
+          if [ -f ./gradlew ]; then
+            ./gradlew assembleDebug --no-daemon
+          else
+            gradle assembleDebug --no-daemon
+          fi
+    artifacts:
+      - android/app/build/outputs/apk/**/*.apk
+    # İstersen APK'yı e-posta ile de gönderebilir (Codemagic'in kolay yanı):
+    publishing:
+      email:
+        recipients:
+          - vt@gmail.com
+        notify:
+          success: true
+          failure: true

@@ -1,0 +1,36 @@
+name: Build APK
+
+# Ne zaman çalışır: her push'ta veya elle tetikleyince (telefondan da tetiklenebilir)
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kodu al
+        uses: actions/checkout@v4
+
+      - name: JDK 17 kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle kur
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Debug APK derle
+        run: gradle assembleDebug --no-daemon
+        working-directory: android
+
+      - name: APK'yı yükle (indirilebilir çıktı)
+        uses: actions/upload-artifact@v4
+        with:
+          name: StockWatch-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
