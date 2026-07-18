@@ -12,19 +12,17 @@ import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.decodeFromJsonElement
 
 object Repository {
 
+    private val appJson = Json { ignoreUnknownKeys = true; isLenient = true }
+
     private val client = HttpClient(OkHttp) {
-        install(ContentNegotiation) {
-            json(Json { ignoreUnknownKeys = true; isLenient = true })
-        }
+        install(ContentNegotiation) { json(appJson) }
     }
 
-    private suspend fun <T> withAuth(block: suspend HttpClient.() -> T): T =
-        client.block()
-
-    // Bekleyen bildirimleri çek (WorkManager çağırır)
     suspend fun fetchPending(): List<RemoteNotification> = try {
         client.get("${Backend.BASE_URL}/pending") {
             header("x-device-token", Backend.DEVICE_TOKEN)
@@ -33,18 +31,21 @@ object Repository {
         emptyList()
     }
 
-    // Ana ekran verisi
-   suspend fun fetchSnapshot(): Map<String, StockSnapshot> = try {
+    suspend fun fetchSnapshot(): Map<String, StockSnapshot> = try {
         val raw = client.get("${Backend.BASE_URL}/snapshot") {
             header("x-device-token", Backend.DEVICE_TOKEN)
-        }.body<kotlinx.serialization.json.JsonObject>()
-        
-        // _updated ve diğer non-object alanları filtrele
+        }.body<JsonObject>()
+
         raw.entries
-            .filter { it.value is kotlinx.serialization.json.JsonObject }
-            .associate { (k, v) ->
-                k to Json.decodeFromJsonElement(StockSnapshot.serializer(), v)
+            .filter { it.value is JsonObject }
+            .mapNotNull { (k, v) ->
+                try {
+                    k to appJson.decodeFromJsonElement(StockSnapshot.serializer(), v)
+                } catch (e: Exception) {
+                    null
+                }
             }
+            .toMap()
     } catch (e: Exception) {
         emptyMap()
     }
@@ -57,7 +58,6 @@ object Repository {
         AppConfig()
     }
 
-    // Ticker ekle/çıkar veya bildirim tercihi değiştir -> config'i geri yaz
     suspend fun saveConfig(cfg: AppConfig): Boolean = try {
         client.post("${Backend.BASE_URL}/config") {
             header("x-device-token", Backend.DEVICE_TOKEN)
@@ -69,7 +69,6 @@ object Repository {
         false
     }
 
-    // Manuel tarama tetikle (test/yenile butonu)
     suspend fun triggerScan(): Boolean = try {
         client.post("${Backend.BASE_URL}/scan") {
             header("x-device-token", Backend.DEVICE_TOKEN)
