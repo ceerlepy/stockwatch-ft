@@ -1,13 +1,28 @@
 name = "stockwatch"
 main = "worker.js"
 compatibility_date = "2024-11-01"
-
+ 
+# --- Workers KV (ücretsiz katman) ---
 [[kv_namespaces]]
 binding = "STOCKWATCH_KV"
 id = "74d0c343a9fd42c8b4f6c1239a118684"
-
+ 
+# --- Cloudflare Workers AI (korelasyon açıklamaları için) ---
+# Ekstra kurulum gerektirmez, hesabına otomatik bağlanır. Ücretsiz katman
+# günlük nöron kotası ile sınırlıdır ama bu kullanım (günde birkaç açıklama)
+# fazlasıyla yeterlidir.
+[ai]
+binding = "AI"
+ 
+# --- Cron Triggers (batch tarama) ---
+# Not: Cloudflare cron sabit; asıl aç/kapa ve mantık config'te (KV) tutulur.
+# Uygulamadaki Settings ekranı bu config'i güncelleyerek hangi taramanın
+# hangi cron'da çalışacağını belirler (scanFreq alanı).
 [triggers]
-crons = ["0 * * * *", "0 */2 * * *"]
+crons = [
+  "0 * * * *",     # saat başı: fiyat + rating + fair value + kritik haber
+  "0 */2 * * *"    # 2 saatte bir: genel haber taraması
+]
 
 [observability.logs]
 enabled = true

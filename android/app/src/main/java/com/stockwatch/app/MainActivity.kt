@@ -4,16 +4,19 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -72,11 +75,12 @@ fun AppScreen(vm: AppViewModel = viewModel()) {
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
+            FloatingActionButton(
                 onClick = { showAdd = true },
-                text = { Text("Hisse Ekle") },
-                icon = { Text("+") }
-            )
+                shape = MaterialTheme.shapes.large,
+            ) {
+                Text("+", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            }
         }
     ) { pad ->
         LazyColumn(
@@ -126,111 +130,155 @@ fun StockCard(
     onEdit: () -> Unit,
     onRemove: () -> Unit,
 ) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    val ratingColor = when (snap?.rating) {
+        "Buy"  -> Color(0xFF2ECC71)
+        "Sell" -> Color(0xFFE74C3C)
+        "Hold" -> Color(0xFFF1C40F)
+        else   -> MaterialTheme.colorScheme.outline
+    }
 
-            // Başlık satırı: sembol + fiyat
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment     = Alignment.CenterVertically
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+    ) {
+        Row(Modifier.fillMaxWidth()) {
+            // Sol renk şeridi — rating durumunu anında gösterir
+            Box(
+                Modifier
+                    .width(5.dp)
+                    .fillMaxHeight()
+                    .background(ratingColor)
+            )
+
+            Column(
+                Modifier
+                    .padding(horizontal = 18.dp, vertical = 16.dp)
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text(ticker.symbol,
-                    style      = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold)
-                snap?.price?.let {
-                    Text("$${fmt(it)}", style = MaterialTheme.typography.titleMedium)
-                }
-            }
 
-            // ── Uyarı / hata durumları ────────────────────────────────────
-            // Geçersiz sembol
-            if (snap?.invalid == true) {
-                StatusChip(
-                    text  = snap.note ?: "\"${ticker.symbol}\" bulunamadı — sembolü kontrol et",
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
-
-            // Rate limit
-            if (snap?.rateLimitError == true) {
-                StatusChip(
-                    text  = snap.rateLimitNote ?: "⚠️ Servis istek limiti aşıldı — sonraki saatte yenilenir",
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
-
-            // ETF / genel not
-            snap?.note?.let { n ->
-                if (snap.invalid != true) {
-                    StatusChip(text = n, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-
-            // ── Normal veri ───────────────────────────────────────────────
-            if (snap?.invalid != true) {
-
-                // Rating
-                snap?.rating?.let { r ->
-                    val icon = when (r) { "Buy" -> "🟢"; "Sell" -> "🔴"; else -> "🟡" }
-                    Text("Rating: $icon $r")
+                // Başlık satırı: sembol + fiyat
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment     = Alignment.CenterVertically
+                ) {
+                    Text(ticker.symbol,
+                        style      = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.ExtraBold)
+                    snap?.price?.let {
+                        Text("$${fmt(it)}",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.SemiBold)
+                    }
                 }
 
-                // Fair value
-                snap?.fairValue?.let { fv ->
-                    // Analist hedefi
-                    if (fv.analystFV != null) {
-                        Text("Fair value (analist): $${fmt(fv.analystFV)}")
-                        snap.price?.let { p ->
-                            val diff  = (p - fv.analystFV) / fv.analystFV * 100
-                            val label = if (diff > 0) "üzerinde 🔴" else "altında 🟢"
-                            Text("  → fiyat adil değerin %${fmt(Math.abs(diff))} $label",
-                                style = MaterialTheme.typography.bodySmall)
+                // ── Uyarı / hata durumları ────────────────────────────────
+                if (snap?.invalid == true) {
+                    StatusChip(
+                        text  = snap.note ?: "\"${ticker.symbol}\" bulunamadı — sembolü kontrol et",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                if (snap?.rateLimitError == true) {
+                    StatusChip(
+                        text  = snap.rateLimitNote ?: "⚠️ Servis istek limiti aşıldı — sonraki saatte yenilenir",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                snap?.note?.let { n ->
+                    if (snap.invalid != true) {
+                        StatusChip(text = n, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+
+                // ── Normal veri ───────────────────────────────────────────
+                if (snap?.invalid != true) {
+
+                    snap?.rating?.let { r ->
+                        val emoji = when (r) { "Buy" -> "🟢"; "Sell" -> "🔴"; else -> "🟡" }
+                        Surface(
+                            color = ratingColor.copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("$emoji  $r",
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold)
                         }
                     }
-                    // P/E modeli
-                    if (fv.peFV != null) {
-                        Text("Fair value (P/E ${fv.targetPe?.toInt()}x): $${fmt(fv.peFV)}")
-                        snap.price?.let { p ->
-                            val diff  = (p - fv.peFV) / fv.peFV * 100
-                            val label = if (diff > 0) "üzerinde 🔴" else "altında 🟢"
-                            Text("  → fiyat adil değerin %${fmt(Math.abs(diff))} $label",
-                                style = MaterialTheme.typography.bodySmall)
+
+                    snap?.fairValue?.let { fv ->
+                        Spacer(Modifier.height(2.dp))
+                        if (fv.analystFV != null) {
+                            FairValueRow("Analist hedefi", fv.analystFV, snap.price)
+                        }
+                        if (fv.peFV != null) {
+                            val label = if (fv.peSource == "auto")
+                                "Fair value (P/E ${fv.targetPe?.toInt()}x, otomatik)"
+                            else "Fair value (P/E ${fv.targetPe?.toInt()}x)"
+                            FairValueRow(label, fv.peFV, snap.price)
+                        }
+                        fv.note?.let { n ->
+                            StatusChip(text = "ℹ️ $n", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        // Kendi güncel P/E'si — sadece bilgi amaçlı, fair value hesabında kullanılmıyor
+                        fv.currentPE?.let { cpe ->
+                            Text("Güncel P/E: ${fmt(cpe)}x",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    // Premium notu
-                    fv.note?.let { n ->
-                        StatusChip(text = "ℹ️ $n",
+
+                    if (ticker.notify.priceAlert) {
+                        val parts = listOfNotNull(
+                            ticker.priceAbove?.let { "↑$${fmt(it)}" },
+                            ticker.priceBelow?.let { "↓$${fmt(it)}" }
+                        )
+                        if (parts.isNotEmpty()) {
+                            Text("🔔 ${parts.joinToString("  ")}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+
+                    if (snap?.price == null && snap?.invalid != true) {
+                        Text("Veri bekleniyor… (saat başı güncellenir)",
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
 
-                // Fiyat alarmı özeti
-                if (ticker.notify.priceAlert) {
-                    val parts = listOfNotNull(
-                        ticker.priceAbove?.let { "Üst: $${fmt(it)}" },
-                        ticker.priceBelow?.let { "Alt: $${fmt(it)}" }
-                    )
-                    if (parts.isNotEmpty()) {
-                        Text("🔔 Fiyat alarmı: ${parts.joinToString(" | ")}",
-                            style = MaterialTheme.typography.bodySmall)
-                    }
-                }
+                Spacer(Modifier.height(6.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                Spacer(Modifier.height(2.dp))
 
-                // Veri bekleniyor (fiyat henüz gelmedi)
-                if (snap?.price == null && snap?.invalid != true) {
-                    Text("Veri bekleniyor… (cron saat başı çalışır)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onEdit) { Text("Ayarlar") }
+                    TextButton(
+                        onClick = onRemove,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) { Text("Kaldır") }
                 }
             }
+        }
+    }
+}
 
-            // Butonlar
-            Spacer(Modifier.height(4.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onEdit) { Text("Ayarlar") }
-                TextButton(onClick = onRemove)  { Text("Kaldır") }
-            }
+@Composable
+fun FairValueRow(label: String, value: Double, price: Double?) {
+    Column {
+        Text("$label: $${fmt(value)}", style = MaterialTheme.typography.bodyMedium)
+        price?.let { p ->
+            val diff  = (p - value) / value * 100
+            val over  = diff > 0
+            Text(
+                "  → fiyat %${fmt(kotlin.math.abs(diff))} ${if (over) "üzerinde" else "altında"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (over) Color(0xFFE74C3C) else Color(0xFF2ECC71)
+            )
         }
     }
 }
@@ -256,7 +304,7 @@ fun StatusChip(text: String, color: androidx.compose.ui.graphics.Color) {
 fun AddTickerDialog(onDismiss: () -> Unit, onAdd: (TickerConfig) -> Unit) {
     var symbol by remember { mutableStateOf("") }
     var isEtf  by remember { mutableStateOf(false) }
-    var pe     by remember { mutableStateOf("40") }
+    var pe     by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -274,9 +322,15 @@ fun AddTickerDialog(onDismiss: () -> Unit, onAdd: (TickerConfig) -> Unit) {
                 if (!isEtf) {
                     OutlinedTextField(
                         value = pe, onValueChange = { pe = it },
-                        label = { Text("Hedef P/E (kendi fair value modelin)") },
+                        label = { Text("Hedef P/E (opsiyonel)") },
+                        placeholder = { Text("Boş bırak, otomatik hesaplansın") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         singleLine = true
+                    )
+                    Text(
+                        "Boş bırakırsan sektör benzerlerinin ortalama çarpanı otomatik kullanılır.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Text(
@@ -353,7 +407,8 @@ fun EditTickerDialog(ticker: TickerConfig, onDismiss: () -> Unit, onSave: (Ticke
                     Text("Fair Value Modeli", fontWeight = FontWeight.Bold)
                     OutlinedTextField(
                         value = pe, onValueChange = { pe = it },
-                        label = { Text("Hedef P/E") }, singleLine = true,
+                        label = { Text("Hedef P/E (opsiyonel)") }, singleLine = true,
+                        placeholder = { Text("Boş = otomatik (sektör ortalaması)") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                     )
                 }
@@ -376,15 +431,20 @@ fun EditTickerDialog(ticker: TickerConfig, onDismiss: () -> Unit, onSave: (Ticke
 // ── Global ayarlar dialog ─────────────────────────────────────────────────
 @Composable
 fun SettingsDialog(current: AppSettings, onDismiss: () -> Unit, onSave: (AppSettings) -> Unit) {
-    var criticalFreq by remember { mutableStateOf(current.criticalNewsFreqHours) }
-    var generalFreq  by remember { mutableStateOf(current.generalNewsFreqHours) }
-    var pollFreq     by remember { mutableStateOf(current.pollIntervalHours) }
+    var criticalFreq   by remember { mutableStateOf(current.criticalNewsFreqHours) }
+    var generalFreq    by remember { mutableStateOf(current.generalNewsFreqHours) }
+    var pollFreq       by remember { mutableStateOf(current.pollIntervalHours) }
+    var correlationOn  by remember { mutableStateOf(current.correlationEnabled) }
+    var moveExplainOn  by remember { mutableStateOf(current.moveExplanationEnabled) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Ayarlar") },
         text  = {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
                 Text("Kritik haber tarama sıklığı", fontWeight = FontWeight.Bold)
                 FreqSelector(criticalFreq) { criticalFreq = it }
 
@@ -394,6 +454,31 @@ fun SettingsDialog(current: AppSettings, onDismiss: () -> Unit, onSave: (AppSett
                 Text("Telefon kontrol sıklığı", fontWeight = FontWeight.Bold)
                 FreqSelector(pollFreq) { pollFreq = it }
 
+                Spacer(Modifier.height(4.dp))
+                Toggle("📊 Otomatik korelasyon uyarıları (deneysel)", correlationOn) { correlationOn = it }
+                if (correlationOn) {
+                    Text(
+                        "Sistem hisseler arası ilişkiyi (ör. TSM→MRVL) kendi keşfeder ve " +
+                        "biri büyük hareket edince diğeri için tahmini uyarı gönderir. " +
+                        "Anlamlı sonuç için birkaç günlük veri birikmesi gerekir.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(Modifier.height(4.dp))
+                Toggle("❓ \"Neden hareket etti\" açıklaması (deneysel)", moveExplainOn) { moveExplainOn = it }
+                if (moveExplainOn) {
+                    Text(
+                        "Bir hisse %3+ hareket ettiğinde o günün haberlerine bakıp " +
+                        "muhtemel sebebi açıklar. Korelasyondan bağımsız çalışır. " +
+                        "Belirgin haber yoksa sebep uydurmaz, bunu açıkça söyler.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(Modifier.height(4.dp))
                 Text(
                     "Fiyat & rating taraması Cloudflare'de saat başı sabit çalışır.",
                     style = MaterialTheme.typography.bodySmall,
@@ -403,7 +488,7 @@ fun SettingsDialog(current: AppSettings, onDismiss: () -> Unit, onSave: (AppSett
         },
         confirmButton = {
             TextButton(onClick = {
-                onSave(AppSettings(criticalFreq, generalFreq, pollFreq))
+                onSave(AppSettings(criticalFreq, generalFreq, pollFreq, correlationOn, moveExplainOn))
             }) { Text("Kaydet") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }

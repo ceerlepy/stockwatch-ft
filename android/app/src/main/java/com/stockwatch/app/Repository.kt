@@ -17,6 +17,9 @@ import kotlinx.serialization.json.decodeFromJsonElement
 
 object Repository {
 
+    // ÖNEMLİ: ignoreUnknownKeys=true olan TEK Json instance'ı — hem HTTP client
+    // hem manuel decode bunu kullanmalı, yoksa bilinmeyen alan gelince
+    // (ör. eski KV verisindeki ratingDetail) parse sessizce patlar.
     private val appJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val client = HttpClient(OkHttp) {
@@ -42,6 +45,7 @@ object Repository {
                 try {
                     k to appJson.decodeFromJsonElement(StockSnapshot.serializer(), v)
                 } catch (e: Exception) {
+                    // Tek bir ticker parse hatası tüm listeyi boşaltmasın
                     null
                 }
             }

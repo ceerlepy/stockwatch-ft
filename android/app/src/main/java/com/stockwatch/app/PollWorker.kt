@@ -76,8 +76,21 @@ class PollWorker(
                 ) return
             }
             val channel =
-                if (n.type == "criticalNews" || n.type == "rating" || n.type == "priceAlert")
+                if (n.type == "criticalNews" || n.type == "rating" ||
+                    n.type == "priceAlert" || n.type == "correlation" ||
+                    n.type == "moveExplanation" || n.type == "regimeChange")
                     CHANNEL_CRITICAL else CHANNEL_NORMAL
+
+            // Tıklayınca uygulamayı açsın
+            val openIntent = android.content.Intent(ctx, MainActivity::class.java).apply {
+                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                        android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("symbol", n.symbol)
+            }
+            val pendingIntent = android.app.PendingIntent.getActivity(
+                ctx, n.id.hashCode(), openIntent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+            )
 
             val builder = NotificationCompat.Builder(ctx, channel)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
@@ -85,6 +98,7 @@ class PollWorker(
                 .setContentText(n.body)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(n.body))
                 .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
 
             NotificationManagerCompat.from(ctx)
                 .notify(n.id.hashCode(), builder.build())

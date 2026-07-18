@@ -26,6 +26,8 @@ data class FairValue(
     val analystFV: Double? = null,
     val peFV: Double? = null,
     val targetPe: Double? = null,
+    val peSource: String? = null,  // "manual" veya "auto" (sektör benzerleri ortalaması)
+    val currentPE: Double? = null, // hissenin kendi güncel P/E'si — bilgi amaçlı, fair value hesabında kullanılmaz
     val note: String? = null,      // "Finnhub premium gerekli" gibi notlar
 )
 
@@ -33,6 +35,7 @@ data class FairValue(
 data class StockSnapshot(
     val price: Double? = null,
     val rating: String? = null,
+    val ratingDetail: kotlinx.serialization.json.JsonObject? = null,
     val fairValue: FairValue? = null,
     val priceTime: Long? = null,
     // Durum / uyarı alanları
@@ -67,6 +70,8 @@ data class AppSettings(
     val criticalNewsFreqHours: Int = 1,
     val generalNewsFreqHours: Int = 2,
     val pollIntervalHours: Int = 1,
+    val correlationEnabled: Boolean = false,      // TSM→MRVL gibi otomatik korelasyon uyarıları
+    val moveExplanationEnabled: Boolean = false,  // haber bazlı "neden hareket etti" açıklaması
 )
 
 @Serializable
