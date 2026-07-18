@@ -2,20 +2,16 @@ package com.stockwatch.app
 
 import kotlinx.serialization.Serializable
 
-// ---- Worker'a bağlanma ayarları ----
 object Backend {
-    // Kendi Worker adresin (wrangler deploy sonrası çıkar)
-    const val BASE_URL = "https://stockwatch.veyseltosun-vt.workers.dev"
-    // wrangler secret put DEVICE_TOKEN ile koyduğun değerin AYNISI
+    const val BASE_URL    = "https://stockwatch.veyseltosun-vt.workers.dev"
     const val DEVICE_TOKEN = "vt-mrvl-9f3kQ7xP2z"
 }
 
-// ---- Bildirim modeli (Worker /pending döndürür) ----
 @Serializable
 data class RemoteNotification(
     val id: String,
     val symbol: String,
-    val type: String,       // rating | fairValue | criticalNews | news
+    val type: String,
     val title: String,
     val body: String,
     val url: String? = null,
@@ -25,23 +21,29 @@ data class RemoteNotification(
 @Serializable
 data class PendingResponse(val notifications: List<RemoteNotification> = emptyList())
 
-// ---- Anlık durum (ana ekran için) ----
 @Serializable
 data class FairValue(
     val analystFV: Double? = null,
     val peFV: Double? = null,
     val targetPe: Double? = null,
+    val note: String? = null,      // "Finnhub premium gerekli" gibi notlar
 )
 
 @Serializable
 data class StockSnapshot(
     val price: Double? = null,
     val rating: String? = null,
+    val ratingDetail: kotlinx.serialization.json.JsonObject? = null,
     val fairValue: FairValue? = null,
     val priceTime: Long? = null,
+    // Durum / uyarı alanları
+    val invalid: Boolean? = null,        // geçersiz sembol
+    val unsupported: Boolean? = null,    // Finnhub desteklemiyor
+    val rateLimitError: Boolean? = null, // 429 rate limit
+    val rateLimitNote: String? = null,
+    val note: String? = null,            // genel not (ETF notu, sembol uyarısı vs)
 )
 
-// ---- Config (ticker listesi + bildirim tercihleri) ----
 @Serializable
 data class NotifyPrefs(
     val rating: Boolean = true,
@@ -63,14 +65,15 @@ data class TickerConfig(
 
 @Serializable
 data class AppSettings(
-    val criticalNewsFreqHours: Int = 1,   // 1 veya 2
-    val generalNewsFreqHours: Int = 2,    // 1 veya 2
-    val pollIntervalHours: Int = 1,       // telefon kaç saatte bir kontrol etsin
+    val criticalNewsFreqHours: Int = 1,
+    val generalNewsFreqHours: Int = 2,
+    val pollIntervalHours: Int = 1,
 )
 
 @Serializable
 data class AppConfig(
     val defaultTargetPe: Double = 40.0,
+    val finnhubUrl: String = "https://finnhub.io/api/v1",
     val settings: AppSettings = AppSettings(),
     val tickers: List<TickerConfig> = emptyList(),
 )

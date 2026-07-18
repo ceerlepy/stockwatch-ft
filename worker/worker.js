@@ -1,411 +1,347 @@
 /**
  * StockWatch Backend — Cloudflare Worker
- * -------------------------------------------------
- * Görevi:
- *  - Cron ile Finnhub'dan fiyat / analist rating / fiyat hedefi / haber çeker
- *  - Önceki değerle karşılaştırır (Workers KV'de saklanır)
- *  - Değişiklik varsa "bekleyen bildirim" olarak KV'ye yazar
- *  - Android uygulaması /pending endpoint'inden bunları çeker (polling)
+ * Best-practice, production-ready versiyon
  *
- * Ücretsiz katman: Cron Triggers + Workers KV yeterli.
- * Scraping YOK — resmi Finnhub API (ToS'a uygun).
- *
- * KV Namespace binding: STOCKWATCH_KV
- * Secret: FINNHUB_KEY  (wrangler secret put FINNHUB_KEY)
- * Secret: DEVICE_TOKEN (basit kimlik doğrulama için paylaşılan gizli anahtar)
+ * - Yeni ticker → ayrı KV'de validation queue, race condition yok
+ * - Finnhub URL config'den (API değişimi tek satır)
+ * - notify eksikse varsayılan doldur
+ * - price-target/metric 403 → "premium" notu, devam et
+ * - 429 → snapshot'a yaz + retry bilgisi
+ * - ETF/ETC → sadece fiyat + haber, rating/fairvalue atla
+ * - Geçersiz sembol → snapshot'a invalid + note yaz
+ * - Ticker'lar arası 1sn bekleme
  */
 
-const FINNHUB = "https://finnhub.io/api/v1";
+const DEFAULT_FINNHUB = "https://finnhub.io/api/v1";
 
-// Kritik haber olarak sayılacak anahtar kelimeler (şirketin kendi haberleri için)
 const CRITICAL_KEYWORDS = [
-  "earnings", "guidance", "acquisition", "acquire", "merger",
-  "ceo", "cfo", "resign", "appoint", "downgrade", "upgrade",
-  "lawsuit", "sec", "dividend", "buyback", "layoff", "restructur",
-  "profit warning", "outlook", "forecast",
+  "earnings","guidance","acquisition","acquire","merger",
+  "ceo","cfo","resign","appoint","downgrade","upgrade",
+  "lawsuit","sec","dividend","buyback","layoff","restructur",
+  "profit warning","outlook","forecast",
 ];
 
+const DEFAULT_NOTIFY = {
+  rating: true, fairValue: true, criticalNews: true,
+  generalNews: false, priceAlert: false,
+};
+
 export default {
-  // ---- HTTP: Android uygulaması buraya sorar ----
   async fetch(request, env) {
-    const url = new URL(request.url);
-
-    // Basit kimlik doğrulama
+    const url  = new URL(request.url);
     const auth = request.headers.get("x-device-token");
-    if (auth !== env.DEVICE_TOKEN) {
-      return json({ error: "unauthorized" }, 401);
-    }
+    if (auth !== env.DEVICE_TOKEN) return resp({ error: "unauthorized" }, 401);
 
-    if (url.pathname === "/pending" && request.method === "GET") {
-      return handlePending(env);
+    switch (`${request.method} ${url.pathname}`) {
+      case "GET /pending":  return handlePending(env);
+      case "GET /snapshot": return resp(await env.STOCKWATCH_KV.get("snapshot","json") || {});
+      case "GET /config":   return resp(await env.STOCKWATCH_KV.get("config","json")   || defaultConfig());
+      case "POST /config":  return handleConfigSave(request, env);
+      case "POST /scan":    await runScan(env, "manual"); return resp({ ok: true });
+      default:              return resp({ error: "not found" }, 404);
     }
-
-    if (url.pathname === "/config" && request.method === "GET") {
-      const cfg = await env.STOCKWATCH_KV.get("config", "json");
-      return json(cfg || defaultConfig());
-    }
-
-    if (url.pathname === "/config" && request.method === "POST") {
-      const body = await request.json();
-      await env.STOCKWATCH_KV.put("config", JSON.stringify(body));
-      return json({ ok: true, config: body });
-    }
-
-    // Manuel tetikleme (test için)
-    if (url.pathname === "/scan" && request.method === "POST") {
-      await runScan(env, "manual");
-      return json({ ok: true });
-    }
-
-    // Anlık durum (uygulama ana ekranı için)
-    if (url.pathname === "/snapshot" && request.method === "GET") {
-      const snap = await env.STOCKWATCH_KV.get("snapshot", "json");
-      return json(snap || {});
-    }
-
-    return json({ error: "not found" }, 404);
   },
 
-  // ---- Cron: zamanlanmış tarama ----
   async scheduled(event, env, ctx) {
-    // cron ifadesine göre hangi tür tarama olduğunu anlıyoruz
-    // wrangler.toml'da 3 ayrı cron tanımlı
     ctx.waitUntil(runScan(env, event.cron));
   },
 };
 
-// --------------------------------------------------
-// Bekleyen bildirimleri döndür ve temizle
-// --------------------------------------------------
-async function handlePending(env) {
-  const pending = (await env.STOCKWATCH_KV.get("pending", "json")) || [];
-  // Uygulama çektikten sonra kuyruğu temizliyoruz
-  if (pending.length > 0) {
-    await env.STOCKWATCH_KV.put("pending", JSON.stringify([]));
+// ── Config kaydet ──────────────────────────────────────────────────────────
+async function handleConfigSave(request, env) {
+  const body     = await request.json();
+  const existing = await env.STOCKWATCH_KV.get("config","json") || defaultConfig();
+  const existingSymbols = new Set(existing.tickers.map(t => t.symbol));
+
+  // Yeni sembolleri validation kuyruğuna ekle (config'e _new yazmıyoruz)
+  const newSymbols = body.tickers
+    .map(t => t.symbol)
+    .filter(s => !existingSymbols.has(s));
+
+  if (newSymbols.length > 0) {
+    const pending = JSON.parse(await env.STOCKWATCH_KV.get("validation_queue") || "[]");
+    const merged  = [...new Set([...pending, ...newSymbols])];
+    await env.STOCKWATCH_KV.put("validation_queue", JSON.stringify(merged));
   }
-  return json({ notifications: pending });
+
+  // notify alanlarını her zaman tamamla
+  body.tickers = body.tickers.map(t => ({
+    ...t,
+    notify: { ...DEFAULT_NOTIFY, ...(t.notify || {}) },
+  }));
+
+  await env.STOCKWATCH_KV.put("config", JSON.stringify(body));
+  return resp({ ok: true });
 }
 
-// --------------------------------------------------
-// Ana tarama fonksiyonu
-// --------------------------------------------------
+// ── Bekleyen bildirimleri döndür ve temizle ───────────────────────────────
+async function handlePending(env) {
+  const pending = await env.STOCKWATCH_KV.get("pending","json") || [];
+  if (pending.length > 0) await env.STOCKWATCH_KV.put("pending", "[]");
+  return resp({ notifications: pending });
+}
+
+// ── Ana tarama ────────────────────────────────────────────────────────────
 async function runScan(env, cronTag) {
-  const config = (await env.STOCKWATCH_KV.get("config", "json")) || defaultConfig();
-  const key = env.FINNHUB_KEY;
+  const config   = await env.STOCKWATCH_KV.get("config","json") || defaultConfig();
+  const FINNHUB  = config.finnhubUrl || DEFAULT_FINNHUB;
+  const key      = env.FINNHUB_KEY;
+  const settings = config.settings   || defaultSettings();
 
-  // Ayarlar (Settings ekranından değiştirilebilir)
-  const settings = config.settings || defaultSettings();
-
-  // Hangi cron çalıştı? (wrangler.toml ile eşleşir)
-  //  "0 * * * *"      -> saatlik batch
-  //  "0 */2 * * *"    -> 2 saatlik batch
-  const isHourly = cronTag === "0 * * * *";
+  const isHourly  = cronTag === "0 * * * *";
   const is2Hourly = cronTag === "0 */2 * * *";
-  const isManual = cronTag === "manual";
+  const isManual  = cronTag === "manual";
 
-  const doPriceRating = isHourly || isManual;
+  const doPriceRating  = isHourly || isManual;
+  const doGeneralNews  = isManual
+    || (settings.generalNewsFreqHours  === 1 && isHourly)
+    || (settings.generalNewsFreqHours  === 2 && is2Hourly);
+  const doCriticalNews = isManual
+    || (settings.criticalNewsFreqHours === 1 && isHourly)
+    || (settings.criticalNewsFreqHours === 2 && (isHourly || is2Hourly));
 
-  // Genel haber sıklığı: kullanıcı 1 veya 2 saat seçebilir
-  const doGeneralNews =
-    isManual ||
-    (settings.generalNewsFreqHours === 1 && isHourly) ||
-    (settings.generalNewsFreqHours === 2 && is2Hourly);
-
-  // Kritik haber sıklığı: kullanıcı 1 veya 2 saat seçebilir (varsayılan 1 saat)
-  const doCriticalNews =
-    isManual ||
-    (settings.criticalNewsFreqHours === 1 && isHourly) ||
-    (settings.criticalNewsFreqHours === 2 && (isHourly || is2Hourly));
-
-  const newNotifications = [];
-  const snapshot = (await env.STOCKWATCH_KV.get("snapshot", "json")) || {};
+  const snapshot  = await env.STOCKWATCH_KV.get("snapshot","json") || {};
+  const notes     = [];
+  const validationQueue = new Set(
+    JSON.parse(await env.STOCKWATCH_KV.get("validation_queue") || "[]")
+  );
 
   for (const t of config.tickers) {
     const sym = t.symbol;
     snapshot[sym] = snapshot[sym] || {};
-    // notify alanı eksikse varsayılanı kullan
-    t.notify = t.notify || {
-      rating: true, fairValue: true, criticalNews: true,
-      generalNews: false, priceAlert: false
-    };
+    t.notify = { ...DEFAULT_NOTIFY, ...(t.notify || {}) };
+
+    // ── Yeni sembol validasyonu ───────────────────────────────────────────
+    if (validationQueue.has(sym)) {
+      const valid = await validateSymbol(FINNHUB, key, sym);
+      validationQueue.delete(sym);
+      if (!valid) {
+        snapshot[sym] = {
+          invalid: true,
+          note: `"${sym}" Finnhub'da bulunamadı. Sembolü kontrol et.`,
+          _updated: Date.now(),
+        };
+        console.log(`[INVALID] ${sym}`);
+        continue;
+      }
+      console.log(`[VALID] ${sym}`);
+    }
+
+    // Daha önce geçersiz işaretlendiyse atla
+    if (snapshot[sym].invalid) continue;
+
+    const isEtf       = t.isEtf === true;
+    const doRating    = !isEtf && t.notify.rating    !== false;
+    const doFairValue = !isEtf && t.notify.fairValue !== false;
+
+    // Rate limit koruması
+    await sleep(1000);
 
     try {
-      // ---- FİYAT (rating kapalı olsa bile çekilir) ----
+      // ── 1. Fiyat ─────────────────────────────────────────────────────
       if (doPriceRating) {
-        const quote = await fetchJson(`${FINNHUB}/quote?symbol=${sym}&token=${key}`);
-        if (quote && typeof quote.c === "number") {
-          snapshot[sym].price = quote.c;
-          snapshot[sym].priceTime = Date.now();
+        const quote = await get(FINNHUB, `/quote?symbol=${sym}&token=${key}`);
+        if (quote?.c > 0) {
+          snapshot[sym].price         = quote.c;
+          snapshot[sym].priceTime     = Date.now();
+          snapshot[sym].rateLimitError = false;
+          if (isEtf) snapshot[sym].note = "ETF/ETC — fiyat & haber takibi";
 
-          // Fiyat eşiği bildirimi (kullanıcı Settings'ten sınır koyduysa)
-          if (t.notify.priceAlert === true) {
-            const above = t.priceAbove;
-            const below = t.priceBelow;
-            const lastFlag = await kvGet(env, `pricealert:${sym}`);
-            if (typeof above === "number" && quote.c >= above && lastFlag !== "above") {
-              newNotifications.push(mkNote(
-                sym, "priceAlert", `${sym}: Fiyat üst sınırı geçti`,
-                `$${round2(quote.c)} ≥ $${above}`
-              ));
-              await kvPut(env, `pricealert:${sym}`, "above");
-            } else if (typeof below === "number" && quote.c <= below && lastFlag !== "below") {
-              newNotifications.push(mkNote(
-                sym, "priceAlert", `${sym}: Fiyat alt sınırın altında`,
-                `$${round2(quote.c)} ≤ $${below}`
-              ));
-              await kvPut(env, `pricealert:${sym}`, "below");
-            } else if (
-              (typeof above !== "number" || quote.c < above) &&
-              (typeof below !== "number" || quote.c > below)
-            ) {
-              // Bandın içine döndü -> tekrar tetiklenebilir
-              await kvPut(env, `pricealert:${sym}`, "in");
-            }
+          // Fiyat alarmı
+          if (t.notify.priceAlert) {
+            await checkPriceAlert(env, sym, quote.c, t.priceAbove, t.priceBelow, notes);
           }
-        }
-
-        // ---- RATING + FAIR VALUE ----
-        if (t.notify.rating !== false || t.notify.fairValue !== false) {
-
-        // ETF/ETC (ör. SGLN) için rating/hedef gelmez, atla
-        if (!t.isEtf) {
-          // Analist rating
-          const recs = await fetchJson(
-            `${FINNHUB}/stock/recommendation?symbol=${sym}&token=${key}`
-          );
-          if (Array.isArray(recs) && recs.length > 0) {
-            const latest = recs[0];
-            const rating = deriveRating(latest); // Buy / Hold / Sell
-            const prev = await kvGet(env, `rating:${sym}`);
-            snapshot[sym].rating = rating;
-            snapshot[sym].ratingDetail = latest;
-            if (prev && prev !== rating && t.notify.rating !== false) {
-              newNotifications.push(mkNote(
-                sym,
-                "rating",
-                `${sym}: Rating değişti`,
-                `${prev} → ${rating}`
-              ));
-            }
-            await kvPut(env, `rating:${sym}`, rating);
-          }
-
-          // Fiyat hedefi (fair value proxy #1) + kendi P/E modeli (#2)
-          if (t.notify.fairValue !== false) {
-            const pt = await fetchJson(
-              `${FINNHUB}/stock/price-target?symbol=${sym}&token=${key}`
-            );
-            let analystFV = null;
-            if (pt && typeof pt.targetMean === "number" && pt.targetMean > 0) {
-              analystFV = round2(pt.targetMean);
-            }
-
-            // Kendi basit P/E modeli: EPS * hedef P/E
-            // metric endpoint'inden TTM EPS alıyoruz
-            const metric = await fetchJson(
-              `${FINNHUB}/stock/metric?symbol=${sym}&metric=all&token=${key}`
-            );
-            let peFV = null;
-            const eps = metric?.metric?.epsTTM ?? metric?.metric?.epsInclExtraItemsTTM;
-            const targetPe = t.targetPe ?? config.defaultTargetPe ?? 40;
-            if (typeof eps === "number" && eps > 0) {
-              peFV = round2(eps * targetPe);
-            }
-
-            const combined = { analystFV, peFV, targetPe };
-            const prev = await kvGet(env, `fv:${sym}`, true);
-            snapshot[sym].fairValue = combined;
-
-            // Aynı gün içinde değişim kontrolü
-            if (prev && fvChanged(prev, combined)) {
-              newNotifications.push(mkNote(
-                sym,
-                "fairValue",
-                `${sym}: Fair value güncellendi`,
-                fvSummary(prev, combined)
-              ));
-            }
-            await kvPut(env, `fv:${sym}`, JSON.stringify(combined));
-          }
-        }
-        } // rating/fairValue bloğu sonu
-      } // doPriceRating bloğu sonu
-
-      // ---- HABERLER ----
-      if ((doGeneralNews || doCriticalNews)) {
-        const today = new Date();
-        const from = new Date(today.getTime() - 2 * 24 * 3600 * 1000);
-        const news = await fetchJson(
-          `${FINNHUB}/company-news?symbol=${sym}` +
-          `&from=${fmtDate(from)}&to=${fmtDate(today)}&token=${key}`
-        );
-        if (Array.isArray(news)) {
-          const seen = (await kvGet(env, `newsseen:${sym}`, true)) || [];
-          const seenSet = new Set(seen);
-          const freshSeen = [];
-
-          for (const n of news.slice(0, 30)) {
-            const id = String(n.id);
-            freshSeen.push(id);
-            if (seenSet.has(id)) continue;
-
-            const headline = (n.headline || "").toLowerCase();
-            const isCritical = CRITICAL_KEYWORDS.some((kw) =>
-              headline.includes(kw)
-            );
-
-            // Kritik haber -> her zaman bildir (eğer açıksa)
-            // Genel haber -> sadece 2 saatlik batch'te ve kullanıcı istiyorsa
-            if (isCritical && doCriticalNews && t.notify.criticalNews !== false) {
-              newNotifications.push(mkNote(
-                sym,
-                "criticalNews",
-                `⚠️ ${sym}: Kritik haber`,
-                n.headline,
-                n.url
-              ));
-            } else if (!isCritical && doGeneralNews && t.notify.generalNews === true) {
-              newNotifications.push(mkNote(
-                sym,
-                "news",
-                `${sym}: Haber`,
-                n.headline,
-                n.url
-              ));
-            }
-          }
-          // Son 60 haberi "görüldü" olarak sakla (KV şişmesin)
-          await kvPut(env, `newsseen:${sym}`, JSON.stringify(freshSeen.slice(0, 60)));
+        } else if (quote?.c === 0) {
+          snapshot[sym].note = `"${sym}" fiyatı 0 — sembolü kontrol et`;
         }
       }
+
+      // ── 2. Rating ─────────────────────────────────────────────────────
+      if (doPriceRating && doRating) {
+        const recs = await get(FINNHUB, `/stock/recommendation?symbol=${sym}&token=${key}`);
+        if (Array.isArray(recs) && recs.length > 0) {
+          const rating = deriveRating(recs[0]);
+          const prev   = await env.STOCKWATCH_KV.get(`rating:${sym}`);
+          snapshot[sym].rating       = rating;
+          snapshot[sym].ratingDetail = recs[0];
+          if (prev && prev !== rating) {
+            notes.push(note(sym, "rating", `${sym}: Rating değişti`, `${prev} → ${rating}`));
+          }
+          await env.STOCKWATCH_KV.put(`rating:${sym}`, rating);
+        }
+      }
+
+      // ── 3. Fair value ─────────────────────────────────────────────────
+      if (doPriceRating && doFairValue) {
+        let analystFV = null, peFV = null, fvNote = null;
+
+        const pt = await getSoft(FINNHUB, `/stock/price-target?symbol=${sym}&token=${key}`);
+        if (pt === "PREMIUM") {
+          fvNote = "Analist hedefi: Finnhub premium gerekli";
+        } else if (pt?.targetMean > 0) {
+          analystFV = round2(pt.targetMean);
+        }
+
+        const metric = await getSoft(FINNHUB, `/stock/metric?symbol=${sym}&metric=all&token=${key}`);
+        if (metric && metric !== "PREMIUM") {
+          const eps = metric?.metric?.epsTTM ?? metric?.metric?.epsInclExtraItemsTTM;
+          const pe  = t.targetPe ?? config.defaultTargetPe ?? 40;
+          if (typeof eps === "number" && eps > 0) peFV = round2(eps * pe);
+        }
+
+        const fv   = { analystFV, peFV, targetPe: t.targetPe, note: fvNote };
+        const prev = await env.STOCKWATCH_KV.get(`fv:${sym}`);
+        snapshot[sym].fairValue = fv;
+
+        if (prev && fvChanged(prev, fv)) {
+          notes.push(note(sym, "fairValue", `${sym}: Fair value güncellendi`, fvSummary(prev, fv)));
+        }
+        await env.STOCKWATCH_KV.put(`fv:${sym}`, JSON.stringify(fv));
+      }
+
+      // ── 4. Haberler ───────────────────────────────────────────────────
+      if (doGeneralNews || doCriticalNews) {
+        const today = new Date();
+        const from  = new Date(today.getTime() - 2 * 24 * 3600 * 1000);
+        const news  = await getSoft(FINNHUB,
+          `/company-news?symbol=${sym}&from=${fmtDate(from)}&to=${fmtDate(today)}&token=${key}`
+        );
+        if (Array.isArray(news)) {
+          const seen     = new Set(JSON.parse(await env.STOCKWATCH_KV.get(`newsseen:${sym}`) || "[]"));
+          const freshIds = [];
+          for (const n of news.slice(0, 30)) {
+            const id = String(n.id);
+            freshIds.push(id);
+            if (seen.has(id)) continue;
+            const hl = (n.headline || "").toLowerCase();
+            const critical = CRITICAL_KEYWORDS.some(kw => hl.includes(kw));
+            if (critical && doCriticalNews && t.notify.criticalNews !== false) {
+              notes.push(note(sym, "criticalNews", `⚠️ ${sym}: Kritik haber`, n.headline, n.url));
+            } else if (!critical && doGeneralNews && t.notify.generalNews === true) {
+              notes.push(note(sym, "news", `${sym}: Haber`, n.headline, n.url));
+            }
+          }
+          await env.STOCKWATCH_KV.put(`newsseen:${sym}`, JSON.stringify(freshIds.slice(0, 60)));
+        }
+      }
+
     } catch (err) {
-      // Bir ticker hata verirse diğerleri devam etsin
-      console.log(`scan error ${sym}: ${err}`);
+      const msg = String(err);
+      console.log(`[ERROR] ${sym}: ${msg}`);
+      if (msg.includes("429")) {
+        snapshot[sym].rateLimitError = true;
+        snapshot[sym].rateLimitNote  = "Finnhub istek limiti aşıldı — sonraki saatte yenilenir";
+        snapshot[sym].rateLimitTime  = Date.now();
+      }
     }
   }
 
-  // Snapshot'ı güncelle
+  // Validation kuyruğunu güncelle
+  await env.STOCKWATCH_KV.put("validation_queue", JSON.stringify([...validationQueue]));
+
+  // Snapshot kaydet
   snapshot._updated = Date.now();
   await env.STOCKWATCH_KV.put("snapshot", JSON.stringify(snapshot));
 
-  // Yeni bildirimleri kuyruğa ekle
-  if (newNotifications.length > 0) {
-    const pending = (await env.STOCKWATCH_KV.get("pending", "json")) || [];
-    const merged = [...pending, ...newNotifications].slice(-100); // en fazla 100
-    await env.STOCKWATCH_KV.put("pending", JSON.stringify(merged));
+  // Bildirim kuyruğuna ekle
+  if (notes.length > 0) {
+    const pending = await env.STOCKWATCH_KV.get("pending","json") || [];
+    await env.STOCKWATCH_KV.put("pending", JSON.stringify([...pending, ...notes].slice(-100)));
   }
 }
 
-// --------------------------------------------------
-// Yardımcılar
-// --------------------------------------------------
-function deriveRating(rec) {
-  // Finnhub recommendation: {buy, hold, sell, strongBuy, strongSell, period}
-  const buy = (rec.strongBuy || 0) + (rec.buy || 0);
-  const hold = rec.hold || 0;
-  const sell = (rec.sell || 0) + (rec.strongSell || 0);
-  if (buy >= hold && buy >= sell) return "Buy";
-  if (sell > buy && sell > hold) return "Sell";
-  return "Hold";
-}
-
-function fvChanged(prev, cur) {
-  const p = JSON.parse(prev);
-  return (
-    p.analystFV !== cur.analystFV ||
-    p.peFV !== cur.peFV
-  );
-}
-
-function fvSummary(prevRaw, cur) {
-  const p = JSON.parse(prevRaw);
-  const parts = [];
-  if (p.analystFV !== cur.analystFV) {
-    parts.push(`Analist: $${p.analystFV} → $${cur.analystFV}`);
+// ── Fiyat alarmı ──────────────────────────────────────────────────────────
+async function checkPriceAlert(env, sym, price, above, below, notes) {
+  const lastFlag = await env.STOCKWATCH_KV.get(`pricealert:${sym}`);
+  if (typeof above === "number" && price >= above && lastFlag !== "above") {
+    notes.push(note(sym, "priceAlert", `${sym}: Fiyat üst sınırı geçti`, `$${round2(price)} ≥ $${above}`));
+    await env.STOCKWATCH_KV.put(`pricealert:${sym}`, "above");
+  } else if (typeof below === "number" && price <= below && lastFlag !== "below") {
+    notes.push(note(sym, "priceAlert", `${sym}: Fiyat alt sınırın altında`, `$${round2(price)} ≤ $${below}`));
+    await env.STOCKWATCH_KV.put(`pricealert:${sym}`, "below");
+  } else if (
+    (typeof above !== "number" || price < above) &&
+    (typeof below !== "number" || price > below)
+  ) {
+    await env.STOCKWATCH_KV.put(`pricealert:${sym}`, "in");
   }
-  if (p.peFV !== cur.peFV) {
-    parts.push(`P/E model: $${p.peFV} → $${cur.peFV}`);
-  }
-  return parts.join(" | ") || "Güncellendi";
 }
 
-function mkNote(symbol, type, title, body, url) {
-  return {
-    id: crypto.randomUUID(),
-    symbol,
-    type,
-    title,
-    body,
-    url: url || null,
-    ts: Date.now(),
-  };
+// ── Sembol validasyonu ────────────────────────────────────────────────────
+async function validateSymbol(finnhub, key, sym) {
+  try {
+    const r = await fetch(`${finnhub}/quote?symbol=${sym}&token=${key}`, { cf: { cacheTtl: 0 } });
+    if (!r.ok) return false;
+    const d = await r.json();
+    return d && typeof d.c === "number" && d.c > 0;
+  } catch { return false; }
 }
 
-async function fetchJson(url) {
-  const r = await fetch(url, { cf: { cacheTtl: 0 } });
-  if (!r.ok) {
-    throw new Error(`HTTP ${r.status} → ${url}`);
-  }
+// ── HTTP yardımcıları ─────────────────────────────────────────────────────
+async function get(base, path) {
+  const r = await fetch(base + path, { cf: { cacheTtl: 0 } });
+  if (!r.ok) throw new Error(`HTTP ${r.status} → ${base + path}`);
   return r.json();
 }
 
-async function kvGet(env, k, raw) {
-  return raw ? env.STOCKWATCH_KV.get(k) : env.STOCKWATCH_KV.get(k);
-}
-async function kvPut(env, k, v) {
-  return env.STOCKWATCH_KV.put(k, v);
+async function getSoft(base, path) {
+  const r = await fetch(base + path, { cf: { cacheTtl: 0 } });
+  if (r.status === 403 || r.status === 404) return "PREMIUM";
+  if (!r.ok) throw new Error(`HTTP ${r.status} → ${base + path}`);
+  return r.json();
 }
 
-function json(obj, status = 200) {
+// ── Genel yardımcılar ─────────────────────────────────────────────────────
+function deriveRating(rec) {
+  const buy  = (rec.strongBuy || 0) + (rec.buy || 0);
+  const hold = rec.hold || 0;
+  const sell = (rec.sell || 0) + (rec.strongSell || 0);
+  if (buy >= hold && buy >= sell) return "Buy";
+  if (sell > buy  && sell > hold) return "Sell";
+  return "Hold";
+}
+
+function fvChanged(prevRaw, cur) {
+  try { const p = JSON.parse(prevRaw); return p.analystFV !== cur.analystFV || p.peFV !== cur.peFV; }
+  catch { return false; }
+}
+
+function fvSummary(prevRaw, cur) {
+  try {
+    const p = JSON.parse(prevRaw), parts = [];
+    if (p.analystFV !== cur.analystFV) parts.push(`Analist: $${p.analystFV}→$${cur.analystFV}`);
+    if (p.peFV      !== cur.peFV)      parts.push(`P/E: $${p.peFV}→$${cur.peFV}`);
+    return parts.join(" | ") || "Güncellendi";
+  } catch { return "Güncellendi"; }
+}
+
+function note(symbol, type, title, body, url) {
+  return { id: crypto.randomUUID(), symbol, type, title, body, url: url || null, ts: Date.now() };
+}
+
+function resp(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
-    status,
-    headers: { "content-type": "application/json" },
+    status, headers: { "content-type": "application/json" },
   });
 }
 
-function fmtDate(d) {
-  return d.toISOString().slice(0, 10);
-}
-function round2(n) {
-  return Math.round(n * 100) / 100;
-}
+function fmtDate(d) { return d.toISOString().slice(0, 10); }
+function round2(n)  { return Math.round(n * 100) / 100; }
+function sleep(ms)  { return new Promise(r => setTimeout(r, ms)); }
 
 function defaultSettings() {
-  return {
-    criticalNewsFreqHours: 1,   // 1 veya 2
-    generalNewsFreqHours: 2,    // 1 veya 2
-    pollIntervalHours: 1,       // telefon kaç saatte bir kontrol etsin (bilgi amaçlı)
-  };
+  return { criticalNewsFreqHours: 1, generalNewsFreqHours: 2, pollIntervalHours: 1 };
 }
 
 function defaultConfig() {
   return {
     defaultTargetPe: 40,
+    finnhubUrl: "https://finnhub.io/api/v1",
     settings: defaultSettings(),
     tickers: [
-      {
-        symbol: "MRVL",
-        isEtf: false,
-        targetPe: 50,
-        priceAbove: null,
-        priceBelow: null,
-        notify: { rating: true, fairValue: true, criticalNews: true, generalNews: false, priceAlert: false },
-      },
-      {
-        symbol: "MU",
-        isEtf: false,
-        targetPe: 15,
-        priceAbove: null,
-        priceBelow: null,
-        notify: { rating: true, fairValue: true, criticalNews: true, generalNews: false, priceAlert: false },
-      },
-      {
-        symbol: "SGLN.L",
-        isEtf: true,
-        priceAbove: null,
-        priceBelow: null,
-        notify: { rating: false, fairValue: false, criticalNews: true, generalNews: false, priceAlert: false },
-      },
+      { symbol: "MRVL",   isEtf: false, targetPe: 50, priceAbove: null, priceBelow: null, notify: { ...DEFAULT_NOTIFY } },
+      { symbol: "MU",     isEtf: false, targetPe: 15, priceAbove: null, priceBelow: null, notify: { ...DEFAULT_NOTIFY } },
+      { symbol: "SGLN.L", isEtf: true,                priceAbove: null, priceBelow: null, notify: { rating: false, fairValue: false, criticalNews: true, generalNews: false, priceAlert: false } },
     ],
   };
 }
