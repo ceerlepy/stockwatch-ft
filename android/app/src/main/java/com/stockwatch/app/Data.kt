@@ -33,7 +33,6 @@ data class FairValue(
 data class StockSnapshot(
     val price: Double? = null,
     val rating: String? = null,
-    val ratingDetail: kotlinx.serialization.json.JsonObject? = null,
     val fairValue: FairValue? = null,
     val priceTime: Long? = null,
     // Durum / uyarı alanları

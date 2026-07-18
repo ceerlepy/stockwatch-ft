@@ -34,10 +34,17 @@ object Repository {
     }
 
     // Ana ekran verisi
-    suspend fun fetchSnapshot(): Map<String, StockSnapshot> = try {
-        client.get("${Backend.BASE_URL}/snapshot") {
+   suspend fun fetchSnapshot(): Map<String, StockSnapshot> = try {
+        val raw = client.get("${Backend.BASE_URL}/snapshot") {
             header("x-device-token", Backend.DEVICE_TOKEN)
-        }.body()
+        }.body<kotlinx.serialization.json.JsonObject>()
+        
+        // _updated ve diğer non-object alanları filtrele
+        raw.entries
+            .filter { it.value is kotlinx.serialization.json.JsonObject }
+            .associate { (k, v) ->
+                k to Json.decodeFromJsonElement(StockSnapshot.serializer(), v)
+            }
     } catch (e: Exception) {
         emptyMap()
     }
