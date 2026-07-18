@@ -123,6 +123,11 @@ async function runScan(env, cronTag) {
   for (const t of config.tickers) {
     const sym = t.symbol;
     snapshot[sym] = snapshot[sym] || {};
+    // notify alanı eksikse varsayılanı kullan
+    t.notify = t.notify || {
+      rating: true, fairValue: true, criticalNews: true,
+      generalNews: false, priceAlert: false
+    };
 
     try {
       // ---- FİYAT (rating kapalı olsa bile çekilir) ----
@@ -338,7 +343,9 @@ function mkNote(symbol, type, title, body, url) {
 
 async function fetchJson(url) {
   const r = await fetch(url, { cf: { cacheTtl: 0 } });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) {
+    throw new Error(`HTTP ${r.status} → ${url}`);
+  }
   return r.json();
 }
 
